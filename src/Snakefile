@@ -1,0 +1,52 @@
+# Testing Snipre
+
+REF="../ref/genome.fa"
+
+rule all:
+	input: "../out/bayesian_results.csv"
+
+# filter the vcf to get rid of indels and unlikely genotypes
+# this also fixes up the scaffold names to match snpEff
+rule consensusFilter:
+	input: "../data/var/harpur.vcf.gz", 
+	output: "../data/var/harpur.filtered.vcf"
+	version: "1.0"
+	# remove indels and anything with morethan two alleles
+	shell: """vcftools  --max-missing 0.90 --minQ 40 --gzvcf {input} --max-alleles 2 --remove-indels --mac 1 --recode --keep ../data/var/keep.txt --stdout  > {output}"""
+
+rule allelicPrimitives:
+	input: rules.consensusFilter.output
+	output: "../data/var/harpur.primitives.vcf"
+	shell: "java -Xmx14g -jar $GATK -T VariantsToAllelicPrimitives -R {REF} --variant {input} -o {output}"
+
+# estimate SNP effects
+rule snpEff:
+	input: rules.allelicPrimitives.output, "../ref/cds.fa"
+	output: "../data/var/annotation.csv"
+	shell: """. ~/python2/bin/activate ; java -Xmx7g -jar /apps/unit/MikheyevU/sasha/snpEff4/snpEff.jar -no-utr -no-upstream -no-intron -no-intergenic -no-downstream Amel_OGS3.2 {input[0]} > temp.txt; \
+	python parse_silentReplacement.py  {input[1]} temp.txt > {output} && rm temp.txt """
+
+# determine which SNPs are fixed and which are polymorphic
+# for this we remove the outgroup and compute frequencies
+rule fixedPolymorphic:	
+	input: rules.allelicPrimitives.output
+	output: "../data/var/snps.csv"
+	shell: """vcftools --vcf {input} --remove-indv C11 --freq; \
+    awk -v OFS="," ' NR>1 {{split($5,a,":"); if((a[2]=="1") || (a[2]=="0")) state="F"; else state="P"; print $1,$2,state}}' out.frq > {output} """
+
+# rule fixedPolymorphic_filtered:	
+# 	input: rules.allelicPrimitives.output
+# 	output: "../data/var/snps_filtered.csv"
+# 	shell: """vcftools --vcf {input} --remove-indv C11 --freq; \
+#     awk -v OFS="," ' NR>1 {{split($5,a,":"); if( ((a[2]>0.95) && (a[2]!=1)) || ((a[2]<0.05) && (a[2]!=0))) next ; if((a[2]==1) || (a[2]==0)) state="F"; else if(((a[2]=="1") || (a[2]=="0"))) state="P"; print $1,$2,state}}' out.frq > {output} """
+
+# calculate how many synonymous vs_non-synonymous changes are possible
+rule silentReplacement:
+	input: "../ref/cds.fa"	
+	output: "../data/var/silentReplacement.csv"
+	shell: ". ~/python2/bin/activate; python silent_replacement.py {input} > {output}"
+
+rule snipre:
+	input: rules.silentReplacement.output, rules.fixedPolymorphic.output, rules.snpEff.output
+	output: "../out/bayesian_results.csv"
+	shell: "Rscript --vanilla snipre.R"
